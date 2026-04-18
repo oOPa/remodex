@@ -354,14 +354,15 @@ function createFixedWindowRateLimiter({ windowMs, maxRequests, now = () => Date.
 }
 
 if (require.main === module) {
+  const host = process.env.RELAY_BIND_HOST || "0.0.0.0";
   const port = Number(process.env.PORT || 9000);
   const trustProxy = readOptionalBooleanEnv(["REMODEX_TRUST_PROXY", "PHODEX_TRUST_PROXY"]) ?? false;
   const enablePushService = readOptionalBooleanEnv(
     ["REMODEX_ENABLE_PUSH_SERVICE", "PHODEX_ENABLE_PUSH_SERVICE"]
   ) ?? false;
   const { server } = createRelayServer({ enablePushService, trustProxy });
-  server.listen(port, () => {
-    console.log(`[relay] listening on :${port}`);
+  server.listen(port, host, () => {
+    console.log(`[relay] listening on http://${host}:${port}`);
   });
 }
 

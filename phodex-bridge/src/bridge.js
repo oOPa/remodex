@@ -937,6 +937,10 @@ function startBridge({
     console.warn(normalizedWarning);
   }
 
+  function normalizeVersionString(value) {
+    return typeof value === "string" ? value.trim() : "";
+  }
+
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
   function trackCodexHandshakeState(rawMessage) {
     let parsed = null;

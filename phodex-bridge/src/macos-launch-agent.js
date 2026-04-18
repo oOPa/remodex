@@ -33,8 +33,11 @@ const DEFAULT_PAIRING_WAIT_TIMEOUT_MS = 10_000;
 const DEFAULT_PAIRING_WAIT_INTERVAL_MS = 200;
 
 // Runs the bridge inside launchd while keeping QR rendering in the foreground CLI command.
-function runMacOSBridgeService({ env = process.env } = {}) {
-  assertDarwinPlatform();
+function runMacOSBridgeService({
+  env = process.env,
+  platform = process.platform,
+} = {}) {
+  assertDarwinPlatform(platform);
   const config = readDaemonConfig({ env });
   if (!config?.relayUrl) {
     const message = "No relay URL configured for the macOS bridge service.";
@@ -79,7 +82,8 @@ async function startMacOSBridgeService({
   pairingPollIntervalMs = DEFAULT_PAIRING_WAIT_INTERVAL_MS,
 } = {}) {
   assertDarwinPlatform(platform);
-  const config = readBridgeConfig({ env });
+  const explicitConfig = readBridgeConfig({ env });
+  const config = resolveDaemonServiceConfig(explicitConfig, { env, fsImpl });
   assertRelayConfigured(config);
   const startedAt = Date.now();
 
@@ -393,6 +397,14 @@ function assertRelayConfigured(config) {
     return;
   }
   throw new Error("No relay URL configured. Run ./run-local-remodex.sh or set REMODEX_RELAY before enabling the macOS bridge service.");
+}
+
+function resolveDaemonServiceConfig(config, { env = process.env, fsImpl = fs } = {}) {
+  if (typeof config?.relayUrl === "string" && config.relayUrl.trim()) {
+    return config;
+  }
+
+  return readDaemonConfig({ env, fsImpl }) || config;
 }
 
 function launchAgentDomain(env) {

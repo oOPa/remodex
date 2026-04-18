@@ -61,6 +61,106 @@ test("remodex restart reuses the macOS service start flow", async () => {
   ]);
 });
 
+test("remodex restart reuses the Linux service start flow", async () => {
+  const calls = [];
+  const messages = [];
+
+  await main({
+    argv: ["node", "remodex", "restart"],
+    platform: "linux",
+    consoleImpl: {
+      log(message) {
+        messages.push(message);
+      },
+      error(message) {
+        messages.push(message);
+      },
+    },
+    exitImpl(code) {
+      throw new Error(`unexpected exit ${code}`);
+    },
+    deps: {
+      readBridgeConfig() {
+        calls.push("read-config");
+      },
+      async startLinuxBridgeService(options) {
+        calls.push(["start-service", options]);
+        return {
+          servicePath: "/tmp/remodex.service",
+          pairingSession: null,
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    "read-config",
+    ["start-service", { waitForPairing: false }],
+  ]);
+  assert.deepEqual(messages, [
+    "[remodex] Linux bridge service restarted.",
+  ]);
+});
+
+test("remodex status --json on Linux exposes daemon metadata for companion apps", async () => {
+  const writes = [];
+  const originalWrite = process.stdout.write;
+
+  process.stdout.write = (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  };
+
+  try {
+    await main({
+      argv: ["node", "remodex", "status", "--json"],
+      platform: "linux",
+      consoleImpl: {
+        log() {},
+        error(message) {
+          throw new Error(`unexpected error: ${message}`);
+        },
+      },
+      exitImpl(code) {
+        throw new Error(`unexpected exit ${code}`);
+      },
+      deps: {
+        getLinuxBridgeServiceStatus() {
+          return {
+            daemonConfig: {
+              relayUrl: "ws://127.0.0.1:9000/relay",
+            },
+            bridgeStatus: {
+              connectionStatus: "connected",
+              pid: 77,
+            },
+            pairingSession: {
+              pairingPayload: {
+                relay: "ws://127.0.0.1:9000/relay",
+                sessionId: "session-json",
+              },
+            },
+          };
+        },
+        printLinuxBridgeServiceStatus() {
+          throw new Error("status printer should not run for --json");
+        },
+      },
+    });
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+
+  const payload = JSON.parse(writes.join("").trim());
+  assert.equal(payload.currentVersion, version);
+  assert.equal(payload.daemonConfig?.relayUrl, "ws://127.0.0.1:9000/relay");
+  assert.equal(payload.bridgeStatus?.connectionStatus, "connected");
+  assert.equal(payload.pairingSession?.pairingPayload?.sessionId, "session-json");
+});
+
 test("remodex status --json exposes daemon metadata for companion apps", async () => {
   const writes = [];
   const originalWrite = process.stdout.write;

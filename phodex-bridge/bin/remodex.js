@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 // FILE: remodex.js
-// Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and macOS service control.
+// Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and daemon service control.
 // Layer: CLI binary
 // Exports: none
 // Depends on: ../src
 
 const {
+  getLinuxBridgeServiceStatus,
+  printLinuxBridgePairingQr,
+  printLinuxBridgeServiceStatus,
+  resetLinuxBridgePairing,
+  runLinuxBridgeService,
+  startLinuxBridgeService,
+  stopLinuxBridgeService,
   getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
@@ -22,6 +29,13 @@ const {
 const { version } = require("../package.json");
 
 const defaultDeps = {
+  getLinuxBridgeServiceStatus,
+  printLinuxBridgePairingQr,
+  printLinuxBridgeServiceStatus,
+  resetLinuxBridgePairing,
+  runLinuxBridgeService,
+  startLinuxBridgeService,
+  stopLinuxBridgeService,
   getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
@@ -67,6 +81,16 @@ async function main({
       return;
     }
 
+    if (platform === "linux") {
+      const result = await deps.startLinuxBridgeService({
+        waitForPairing: true,
+      });
+      deps.printLinuxBridgePairingQr({
+        pairingSession: result.pairingSession,
+      });
+      return;
+    }
+
     deps.startBridge();
     return;
   }
@@ -77,28 +101,39 @@ async function main({
   }
 
   if (command === "run-service") {
-    deps.runMacOSBridgeService();
+    if (platform === "darwin") {
+      deps.runMacOSBridgeService();
+      return;
+    }
+
+    if (platform === "linux") {
+      deps.runLinuxBridgeService();
+    } else {
+      deps.startBridge();
+    }
     return;
   }
 
   if (command === "start") {
-    assertMacOSCommand(command, {
+    assertBackgroundServiceCommand(command, {
       platform,
       consoleImpl,
       exitImpl,
     });
     deps.readBridgeConfig();
-    const result = await deps.startMacOSBridgeService({
+    const result = platform === "darwin" ? await deps.startMacOSBridgeService({
+      waitForPairing: false,
+    }) : await deps.startLinuxBridgeService({
       waitForPairing: false,
     });
     emitResult({
       payload: {
         ok: true,
         currentVersion: version,
-        plistPath: result?.plistPath,
+        servicePath: result?.plistPath || result?.servicePath,
         pairingSession: result?.pairingSession,
       },
-      message: "[remodex] macOS bridge service is running.",
+      message: platform === "darwin" ? "[remodex] macOS bridge service is running." : "[remodex] Linux bridge service is running.",
       jsonOutput,
       consoleImpl,
     });
@@ -106,23 +141,25 @@ async function main({
   }
 
   if (command === "restart") {
-    assertMacOSCommand(command, {
+    assertBackgroundServiceCommand(command, {
       platform,
       consoleImpl,
       exitImpl,
     });
     deps.readBridgeConfig();
-    const result = await deps.startMacOSBridgeService({
+    const result = platform === "darwin" ? await deps.startMacOSBridgeService({
+      waitForPairing: false,
+    }) : await deps.startLinuxBridgeService({
       waitForPairing: false,
     });
     emitResult({
       payload: {
         ok: true,
         currentVersion: version,
-        plistPath: result?.plistPath,
+        servicePath: result?.plistPath || result?.servicePath,
         pairingSession: result?.pairingSession,
       },
-      message: "[remodex] macOS bridge service restarted.",
+      message: platform === "darwin" ? "[remodex] macOS bridge service restarted." : "[remodex] Linux bridge service restarted.",
       jsonOutput,
       consoleImpl,
     });
@@ -130,18 +167,22 @@ async function main({
   }
 
   if (command === "stop") {
-    assertMacOSCommand(command, {
+    assertBackgroundServiceCommand(command, {
       platform,
       consoleImpl,
       exitImpl,
     });
-    deps.stopMacOSBridgeService();
+    if (platform === "darwin") {
+      deps.stopMacOSBridgeService();
+    } else {
+      deps.stopLinuxBridgeService();
+    }
     emitResult({
       payload: {
         ok: true,
         currentVersion: version,
       },
-      message: "[remodex] macOS bridge service stopped.",
+      message: platform === "darwin" ? "[remodex] macOS bridge service stopped." : "[remodex] Linux bridge service stopped.",
       jsonOutput,
       consoleImpl,
     });
@@ -149,19 +190,24 @@ async function main({
   }
 
   if (command === "status") {
-    assertMacOSCommand(command, {
+    assertBackgroundServiceCommand(command, {
       platform,
       consoleImpl,
       exitImpl,
     });
     if (jsonOutput) {
       emitJson({
-        ...deps.getMacOSBridgeServiceStatus(),
+        ...(platform === "darwin" ? deps.getMacOSBridgeServiceStatus() : deps.getLinuxBridgeServiceStatus()),
         currentVersion: version,
       });
       return;
     }
-    deps.printMacOSBridgeServiceStatus();
+
+    if (platform === "darwin") {
+      deps.printMacOSBridgeServiceStatus();
+      return;
+    }
+    deps.printLinuxBridgeServiceStatus();
     return;
   }
 
@@ -180,6 +226,21 @@ async function main({
           consoleImpl,
         });
       } else {
+        if (platform === "linux") {
+          deps.resetLinuxBridgePairing();
+          emitResult({
+            payload: {
+              ok: true,
+              currentVersion: version,
+              platform,
+            },
+            message: "[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.",
+            jsonOutput,
+            consoleImpl,
+          });
+          return;
+        }
+
         deps.resetBridgePairing();
         emitResult({
           payload: {
@@ -291,16 +352,16 @@ function emitJson(payload) {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
-function assertMacOSCommand(name, {
+function assertBackgroundServiceCommand(name, {
   platform = process.platform,
   consoleImpl = console,
   exitImpl = process.exit,
 } = {}) {
-  if (platform === "darwin") {
+  if (platform === "darwin" || platform === "linux") {
     return;
   }
 
-  consoleImpl.error(`[remodex] \`${name}\` is only available on macOS. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
+  consoleImpl.error(`[remodex] \`${name}\` is only available on macOS or Linux. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
   exitImpl(1);
 }
 

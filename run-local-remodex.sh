@@ -19,6 +19,12 @@ RELAY_HOSTNAME="${RELAY_HOSTNAME:-}"
 RELAY_BRIDGE_HOST=""
 RELAY_PID=""
 BRIDGE_SERVICE_STARTED="false"
+RELAY_SERVICE_STARTED="false"
+KEEP_SERVICES_RUNNING="false"
+LINUX_RELAY_SERVICE_NAME="com.remodex.local-relay.service"
+REMODEX_STATE_DIR="${REMODEX_DEVICE_STATE_DIR:-${HOME}/.remodex}"
+RELAY_STDOUT_LOG_PATH="${REMODEX_STATE_DIR}/logs/relay.stdout.log"
+RELAY_STDERR_LOG_PATH="${REMODEX_STATE_DIR}/logs/relay.stderr.log"
 
 log() {
   echo "[run-local-remodex] $*"
@@ -42,7 +48,7 @@ Options:
 Defaults:
   --bind-host           0.0.0.0
   --port                9000
-  --hostname            macOS LocalHostName.local, then hostname, then localhost
+  --hostname            macOS LocalHostName.local, then first non-loopback IPv4, then hostname, then localhost
 EOF
 }
 
@@ -98,6 +104,28 @@ default_hostname() {
     fi
   fi
 
+  local detected_ip
+  detected_ip="$(node -e '
+const os = require("node:os");
+
+for (const addresses of Object.values(os.networkInterfaces())) {
+  for (const address of addresses || []) {
+    if (!address || address.internal || address.family !== "IPv4" || !address.address) {
+      continue;
+    }
+    console.log(address.address);
+    process.exit(0);
+  }
+}
+
+process.exit(1);
+' 2>/dev/null || true)"
+  detected_ip="${detected_ip//[$'\r\n']}"
+  if [[ -n "${detected_ip}" ]]; then
+    printf '%s\n' "${detected_ip}"
+    return
+  fi
+
   local host_name
   host_name="$(hostname 2>/dev/null || true)"
   host_name="${host_name//[$'\r\n']}"
@@ -124,11 +152,20 @@ healthcheck_host() {
 }
 
 cleanup() {
+  if [[ "${KEEP_SERVICES_RUNNING}" == "true" ]]; then
+    return
+  fi
+
   if [[ "${BRIDGE_SERVICE_STARTED}" == "true" ]]; then
     (
       cd "${BRIDGE_DIR}"
       node ./bin/remodex.js stop >/dev/null 2>&1 || true
     )
+  fi
+
+  if [[ "${RELAY_SERVICE_STARTED}" == "true" ]]; then
+    stop_linux_relay_service >/dev/null 2>&1 || true
+    return
   fi
 
   if [[ -n "${RELAY_PID}" ]] && kill -0 "${RELAY_PID}" 2>/dev/null; then
@@ -159,10 +196,13 @@ ensure_prerequisites() {
   require_command npm
   require_command curl
   ensure_node_version
+  if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+    require_command systemctl
+  fi
 }
 
 # Validates the advertised host before boot so the QR cannot point at another machine by mistake.
-ensure_hostname_belongs_to_this_mac() {
+ensure_hostname_belongs_to_this_machine() {
   node -e '
 const dns = require("node:dns");
 const os = require("node:os");
@@ -186,7 +226,7 @@ dns.lookup(hostname, { all: true }, (error, records) => {
   const isLocal = records.some((record) => localAddresses.has(record.address));
   process.exit(isLocal ? 0 : 1);
 });
-' "${RELAY_HOSTNAME}" || die "The advertised hostname '${RELAY_HOSTNAME}' does not resolve back to this Mac.
+' "${RELAY_HOSTNAME}" || die "The advertised hostname '${RELAY_HOSTNAME}' does not resolve back to this machine.
 Pass --hostname with a LAN hostname or IP address that points to this machine so the iPhone can connect."
 }
 
@@ -231,6 +271,12 @@ ensure_package_dependencies() {
 }
 
 ensure_port_available() {
+  if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+    if systemctl --user is-active --quiet "${LINUX_RELAY_SERVICE_NAME}"; then
+      return
+    fi
+  fi
+
   if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${RELAY_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
     die "Port ${RELAY_PORT} is already in use. Stop the existing listener or rerun with --port."
   fi
@@ -284,6 +330,88 @@ NODE
   RELAY_PID=$!
 }
 
+escape_systemd_path() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/ /\\ /g'
+}
+
+quote_systemd_value() {
+  printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+linux_relay_service_path() {
+  printf '%s\n' "${HOME}/.config/systemd/user/${LINUX_RELAY_SERVICE_NAME}"
+}
+
+write_linux_relay_service_file() {
+  local service_path
+  local working_directory
+  local stdout_path
+  local stderr_path
+  local quoted_node
+  local quoted_server
+  local quoted_home
+  local quoted_path
+  local quoted_bind_host
+  local quoted_port
+
+  service_path="$(linux_relay_service_path)"
+  working_directory="$(escape_systemd_path "${ROOT_DIR}")"
+  stdout_path="$(escape_systemd_path "${RELAY_STDOUT_LOG_PATH}")"
+  stderr_path="$(escape_systemd_path "${RELAY_STDERR_LOG_PATH}")"
+  quoted_node="$(quote_systemd_value "$(command -v node)")"
+  quoted_server="$(quote_systemd_value "${RELAY_SERVER_MODULE}")"
+  quoted_home="$(quote_systemd_value "${HOME}")"
+  quoted_path="$(quote_systemd_value "${PATH}")"
+  quoted_bind_host="$(quote_systemd_value "${RELAY_BIND_HOST}")"
+  quoted_port="$(quote_systemd_value "${RELAY_PORT}")"
+
+  mkdir -p "$(dirname "${service_path}")" "${REMODEX_STATE_DIR}/logs"
+  cat > "${service_path}" <<EOF
+[Unit]
+Description=Remodex local relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${quoted_node} ${quoted_server}
+Restart=on-failure
+RestartSec=2
+Environment=HOME=${quoted_home}
+Environment=PATH=${quoted_path}
+Environment=RELAY_BIND_HOST=${quoted_bind_host}
+Environment=PORT=${quoted_port}
+WorkingDirectory=${working_directory}
+StandardOutput=append:${stdout_path}
+StandardError=append:${stderr_path}
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+start_linux_relay_service() {
+  log "Starting background relay service on ${RELAY_BIND_HOST}:${RELAY_PORT}"
+  write_linux_relay_service_file
+  systemctl --user daemon-reload
+  systemctl --user enable "${LINUX_RELAY_SERVICE_NAME}" >/dev/null
+  systemctl --user restart "${LINUX_RELAY_SERVICE_NAME}"
+  RELAY_SERVICE_STARTED="true"
+}
+
+stop_linux_relay_service() {
+  systemctl --user disable --now "${LINUX_RELAY_SERVICE_NAME}" >/dev/null 2>&1 || true
+}
+
+start_relay() {
+  if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+    start_linux_relay_service
+    return
+  fi
+
+  start_embedded_relay
+}
+
 print_summary() {
   cat <<EOF
 [run-local-remodex] Configuration
@@ -305,6 +433,12 @@ start_bridge() {
 }
 
 hold_open() {
+  if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+    log "Local relay and bridge are running in the background."
+    log "Use 'systemctl --user status ${LINUX_RELAY_SERVICE_NAME}' for the relay and 'node ./phodex-bridge/bin/remodex.js status --json' for the bridge."
+    return
+  fi
+
   log "Local relay is ready. Keep this terminal open while testing."
   log "Press Ctrl+C to stop both the local relay and the Remodex bridge service."
   wait "${RELAY_PID}"
@@ -319,10 +453,13 @@ RELAY_BRIDGE_HOST="$(healthcheck_host)"
 ensure_prerequisites
 ensure_package_dependencies "${BRIDGE_DIR}"
 ensure_package_dependencies "${RELAY_DIR}"
-ensure_hostname_belongs_to_this_mac
+ensure_hostname_belongs_to_this_machine
 ensure_port_available
 print_summary
-start_embedded_relay
+start_relay
 wait_for_relay
 start_bridge
+if [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+  KEEP_SERVICES_RUNNING="true"
+fi
 hold_open
