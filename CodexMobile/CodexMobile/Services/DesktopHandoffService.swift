@@ -11,6 +11,14 @@ enum DesktopHandoffError: LocalizedError {
     case invalidResponse
     case bridgeError(code: String?, message: String?)
 
+    var isUnsupportedPlatform: Bool {
+        if case .bridgeError(let code, _) = self {
+            return code == "unsupported_platform"
+        }
+
+        return false
+    }
+
     var errorDescription: String? {
         switch self {
         case .disconnected:
@@ -188,7 +196,7 @@ private extension DesktopHandoffError {
         case "missing_thread_id":
             return "This chat does not have a valid thread id yet."
         case "unsupported_platform":
-            return "Mac handoff works only when the bridge is running on macOS."
+            return fallback ?? "Could not continue this chat on your Mac."
         case "handoff_failed":
             return fallback ?? "Could not relaunch Codex.app on your Mac."
         case "wake_display_failed":

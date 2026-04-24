@@ -11,6 +11,52 @@ import XCTest
 final class CodexServiceCatchupRecoveryTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testRecentWindowCatchupCanLeaveMiddleGapUntilCanonicalReconcile() throws {
+        let threadID = "thread-gap"
+        let localMessages = makeAssistantMessages(
+            threadID: threadID,
+            ranges: [
+                1...180,
+                241...400,
+            ]
+        )
+        let canonicalHistory = makeAssistantMessages(
+            threadID: threadID,
+            ranges: [
+                1...500,
+            ]
+        )
+
+        let recentCatchup = try CodexService.mergeRecentHistoryWindow(
+            localMessages,
+            canonicalHistory,
+            activeThreadIDs: [threadID],
+            runningThreadIDs: [threadID],
+            windowSize: 160
+        )
+
+        XCTAssertTrue(
+            recentCatchup.contains(where: { $0.itemId == "item-500" }),
+            "Recent-window catch-up can append the newest server messages."
+        )
+        XCTAssertFalse(
+            recentCatchup.contains(where: { $0.itemId == "item-200" }),
+            "Recent-window catch-up preserves the trusted local prefix, so a pre-existing middle gap can remain."
+        )
+
+        let canonicalReconcile = try CodexService.mergeHistoryMessages(
+            recentCatchup,
+            canonicalHistory,
+            activeThreadIDs: [],
+            runningThreadIDs: []
+        )
+
+        XCTAssertTrue(
+            canonicalReconcile.contains(where: { $0.itemId == "item-200" }),
+            "A full canonical history merge fills the missed middle messages."
+        )
+    }
+
     func testRunningCatchupEscalatesExistingLightweightTaskIntoForcedResume() async {
         let service = makeService()
         let threadID = "thread-running"
@@ -122,5 +168,22 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         let service = CodexService(defaults: defaults)
         Self.retainedServices.append(service)
         return service
+    }
+
+    private func makeAssistantMessages(threadID: String, ranges: [ClosedRange<Int>]) -> [CodexMessage] {
+        ranges.flatMap { range in
+            range.map { index in
+                CodexMessage(
+                    id: "message-\(index)",
+                    threadId: threadID,
+                    role: .assistant,
+                    text: "message-\(index)",
+                    createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
+                    turnId: "turn-\(index)",
+                    itemId: "item-\(index)",
+                    orderIndex: index
+                )
+            }
+        }
     }
 }

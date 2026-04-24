@@ -43,6 +43,9 @@ This repo is local-first now. Do not reintroduce hosted-service assumptions, rem
 - Do not run Xcode tests unless the user explicitly asks. Do not decide to run them on your own.
 - Markdown files inside Xcode-synced groups can still produce harmless warnings.
 - For small iOS/mobile fixes, prefer inspection and targeted edits over simulator runs by default.
+- When a task changes iOS UI, verify the actual rendered result visually after making the change. Prefer existing screenshot/snapshot/UI screenshot checks when available; if the surface has no automated visual coverage, inspect the simulator/device rendering manually and confirm the intended pixels changed.
+- For iOS snapshot/runtime screenshot work, keep scenarios deterministic and review every produced image before calling the task complete. Maintain light and dark variants for runtime UI surfaces where both appearances are supported.
+- Add or strengthen strict iOS screenshot/snapshot coverage for regressions that are primarily visual, especially composer, keyboard, safe-area, navigation chrome, modal, and timeline layout changes.
 
 ## Local quick runbook
 

@@ -574,6 +574,8 @@ struct TurnView: View {
             do {
                 let handoffService = DesktopHandoffService(codex: codex)
                 try await handoffService.continueOnMac(threadId: thread.id)
+            } catch let error as DesktopHandoffError where error.isUnsupportedPlatform {
+                return
             } catch {
                 macHandoffErrorMessage = error.localizedDescription
             }
